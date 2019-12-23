@@ -1,0 +1,362 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS CloudFormation script to configure secure client environment, written by Teresa LaChina.
+
+Parameters:
+  ClientName:
+    Type: String
+
+  VpcCidr:
+    Description: Please enter the IP range (CIDR notation) for this VPC. Must be +1 from other regions. 
+    Type: String
+    Default: 10.X.0.0/16
+
+  PublicSubnetCIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet.
+    Type: String
+    Default: 10.X.0.0/24
+
+  PrivateSubnetCIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet.
+    Type: String
+    Default: 10.X.1.0/24
+
+  # SFTPPublicKey:
+  #   Description: This is the key generated from the client folder you created on your local computer.
+  #   Type: String
+  #   NoEcho: true
+
+  SubnetsAZ:
+    Description: Choose the availability zone for your client.
+    Type: AWS::EC2::AvailabilityZone::Name 
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: 'true'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClientName}-VPC
+  
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+    Properties:
+      Tags:
+        - Key: project
+          Value: !Sub ${ClientName}
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    DependsOn: 
+     - VPC
+     - InternetGateway    
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIPAddress.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+          - Key: project
+            Value: !Sub ${ClientName}-NatGateway
+
+  ElasticIPAddress:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: VPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: 
+     - VPC
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Ref SubnetsAZ
+      CidrBlock: !Ref PublicSubnetCIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClientName}-PublicSubnet
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: 
+     - VPC 
+     - InternetGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Ref SubnetsAZ
+      CidrBlock: !Ref PrivateSubnetCIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClientName}-PrivateSubnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn: VPC
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClientName}-PublicRoute
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn: VPC
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClientName}-PrivateRoute
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: PublicRouteTable
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    DependsOn: PrivateRouteTable
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn: PublicRouteTable
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn: PrivateRouteTable
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ClientName}-project
+      GroupDescription: !Sub ${ClientName} Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+#Add your own inbound rules here      
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: !Sub ${VpcCidr}
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: !Sub ${VpcCidr}    
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: !Sub ${VpcCidr}
+#Add your own outbound rules here. If you leave out SecurityGroupEgress all outbound traffic will be default  
+#If you add a rule all traffic default will go away.      
+      # SecurityGroupEgress:
+      # - IpProtocol:
+      #   FromPort: 
+      #   ToPort:
+      #   CidrIp:     
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClientName}-SG       
+
+  JumpboxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub jumpbox
+      GroupDescription: !Sub jumpbox
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub deleteme        
+
+  RegionLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub aws-logs-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ClientAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ClientName}-project-accesslogs
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ClientDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ClientName}-project
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref ClientAccessLogsBucket
+        LogFilePrefix: S3AccessLogs_        
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  FlowLogs:
+    Type: AWS::EC2::FlowLog
+    DependsOn: RegionLogsBucket
+    Properties:      
+      LogDestination: !Sub arn:aws:s3:::aws-logs-${AWS::AccountId}-${AWS::Region}
+      LogDestinationType: s3
+      ResourceId: !Ref VPC
+      ResourceType: VPC
+      TrafficType: ALL
+
+  S3VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId: !Ref VPC
+
+  SFTPPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ClientName}-sftp-policy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: !Sub ${ClientName}s3policy
+            Effect: "Allow"
+            Action:
+              - "s3:PutObject"
+              - "s3:GetObject"
+              - "s3:ListBucket"
+            Resource:
+              - !Sub arn:aws:s3:::${ClientName}-project,
+              - !Sub arn:aws:s3:::${ClientName}-project/*
+      Roles:
+        - Ref: "SFTPRole"
+        - Ref: "S3EC2Role"
+  
+  SFTPRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ClientName}-stfp-role
+      Description: !Sub SFTP IAM Role for ${ClientName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - transfer.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+
+  S3EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ClientName}-s3-to-ec2
+      Description: !Sub  Copy Files from S3 to EC2 for ${ClientName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+
+  SFTPInstanceProfile1:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: "SFTPRole"
+
+  SFTPInstanceProfile2:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: "S3EC2Role"
+
+  # SFTPServer:  
+  #   Type: AWS::Transfer::Server
+  #   Properties:
+  #     EndpointType: PUBLIC
+  #     LoggingRole: !Sub arn:aws:iam::${AWS::AccountId}:role/${ClientName}-sftp-role
+
+  # SFTPUser:
+  #   Type: AWS::Transfer::User
+  #   Properties:
+  #     HomeDirectory: !Sub /${ClientName}-project
+  #     Policy: >
+  #       {
+  #         "Version": "2012-10-17",
+  #         "Statement": [
+  #           {
+  #             "Sid": { "Fn::Sub": "${ClientName}s3policy" },
+  #             "Effect": "Allow",
+  #             "Action": [
+  #               "s3:PutObject",
+  #               "s3:GetObject",
+  #               "s3:ListBucket"
+  #             ],
+  #             "Resource": [
+  #               { "Fn::Sub": "arn:aws:s3:::${ClientName}-project" },
+  #               { "Fn::Sub": "arn:aws:s3:::${ClientName}-project/*" }
+  #             ]
+  #           }
+  #         ]
+  #       }
+
+  #     Role: !Sub arn:aws:iam::${AWS::AccountId}:role/${ClientName}-sftp-role
+  #     ServerId: !GetAtt SFTPServer.ServerId
+  #     SshPublicKeys: 
+  #      - !Sub ${SFTPPublicKey}
+  #     UserName: !Sub ${ClientName}-sftp-user
+  #     Tags:
+  #       - Key: purpose
+  #         Value: !Sub for transferring data to ${ClientName}
